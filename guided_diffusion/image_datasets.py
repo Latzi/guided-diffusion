@@ -1,6 +1,6 @@
 import math
 import random
-
+import os
 from PIL import Image
 import blobfile as bf
 from mpi4py import MPI
@@ -102,6 +102,8 @@ class ImageDataset(Dataset):
 
     def __getitem__(self, idx):
         path = self.local_images[idx]
+        filename = os.path.basename(path)  # Extract filename from path
+
         with bf.BlobFile(path, "rb") as f:
             pil_image = Image.open(f)
             pil_image.load()
@@ -117,10 +119,11 @@ class ImageDataset(Dataset):
 
         arr = arr.astype(np.float32) / 127.5 - 1
 
-        out_dict = {}
+        out_dict = {'image_filenames': filename}  # Include filename in the returned dictionary
         if self.local_classes is not None:
             out_dict["y"] = np.array(self.local_classes[idx], dtype=np.int64)
         return np.transpose(arr, [2, 0, 1]), out_dict
+
 
 
 def center_crop_arr(pil_image, image_size):
