@@ -53,6 +53,14 @@ def main():
     print("Discriminator Architecture:")
     print(discriminator)
 
+    # After initializing the discriminator
+    # Corrected GAN Loss initialization with LSGAN mode
+    gan_loss = GANLoss(gan_mode='lsgan').to(dist_util.dev())
+   
+
+    # Printing out to verify the instantiation
+    print("GAN Loss initialized:", gan_loss)
+
     # Optionally, to see a more detailed summary including the number of parameters per layer
     total_params = sum(p.numel() for p in discriminator.parameters())
     print(f"Total parameters in discriminator: {total_params}")
