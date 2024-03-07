@@ -235,6 +235,10 @@ class TrainLoop:
             fake_preds = self.discriminator(model_output.detach())
             gan_loss = self.gan_loss(fake_preds, False)  # Calculate GAN loss for fake predictions
 
+            # Right before the problematic print statement, add:
+            print("GAN loss tensor:", gan_loss)
+            #print("GAN loss tensor shape:", gan_loss.shape)
+
             # Ensure the loss is reduced to a scalar if necessary
             gan_loss_scalar = gan_loss.mean()  # Use .mean() to reduce to a scalar if not already one
 
