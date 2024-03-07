@@ -162,7 +162,7 @@ class TrainLoop:
             )
             self.opt.load_state_dict(state_dict)
 
-    def load_bb_data(self, image_filename, bbox_dir="/content/guided-diffusion/datasets/Cityscapes_3009_bb/"):
+    def load_bb_data(self, image_filename, bbox_dir="/content/guided-diffusion/datasets/CIFAR-10_car_3009_bb/"):
         bb_file = os.path.join(bbox_dir, os.path.splitext(image_filename)[0] + ".json")
         with open(bb_file, "r") as f:
             bb_data = json.load(f)
