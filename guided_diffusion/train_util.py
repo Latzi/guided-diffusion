@@ -10,6 +10,8 @@ import torch.distributed as dist
 import torchvision.utils as vutils
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 from torch.optim import AdamW
+from GAN_modules.networks import define_person_D, GANLoss
+
 
 from . import dist_util, logger
 from .fp16_util import MixedPrecisionTrainer
@@ -42,7 +44,7 @@ class TrainLoop:
         microbatch,
         lr,
         ema_rate,
-        log_interval,
+        log_interval, 
         save_interval,
         resume_checkpoint,
         use_fp16=False,
@@ -50,10 +52,14 @@ class TrainLoop:
         schedule_sampler=None,
         weight_decay=0.0,
         lr_anneal_steps=0,
+        discriminator,  # Add the discriminator parameter
+        gan_loss,       # Add the GAN loss parameter
     ):
         self.model = model
         self.diffusion = diffusion
         self.data = data
+        self.discriminator = discriminator  # Store the discriminator as an attribute
+        self.gan_loss = gan_loss            # Store the GAN loss as an attribute
         self.batch_size = batch_size
         self.microbatch = microbatch if microbatch > 0 else batch_size
         self.lr = lr
@@ -202,66 +208,51 @@ class TrainLoop:
         self.log_step()
 
     def forward_backward(self, batch, cond):
-        #print("Filenames from data loader:", cond.get("image_filenames", []))  # Add this line to print filenames
         self.mp_trainer.zero_grad()
         for i in range(0, batch.shape[0], self.microbatch):
             micro = batch[i: i + self.microbatch].to(dist_util.dev())
             micro_cond = {k: v[i: i + self.microbatch].to(dist_util.dev()) if isinstance(v, torch.Tensor) else v for k, v in cond.items()}
 
-            # Temporarily preserve filenames for saving images
-            # Use actual filenames from cond if available, otherwise generate placeholder names
-            
-            #temp_filenames = cond.get("image_filenames", [])
             temp_filenames = micro_cond.get("image_filenames", ["image_{}".format(i) for i in range(len(micro))])
-            if not temp_filenames:  # Check if temp_filenames is empty
-                # Handle the case where filenames are not provided
-               temp_filenames = ["image_{}".format(i) for i in range(len(batch))]
+            if not temp_filenames:
+                temp_filenames = ["image_{}".format(i) for i in range(len(batch))]
               
             last_batch = (i + self.microbatch) >= batch.shape[0]
             t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
 
-            # Create noise masks based on BBs
             noise_masks = torch.zeros_like(micro)
             for j, img_name in enumerate(temp_filenames):
                 bb = self.load_bb_data(img_name)
                 noise_masks[j, :, bb['y']:bb['y'] + bb['h'], bb['x']:bb['x'] + bb['w']] = 1
 
-            # Add noise only within BB regions
             noise = torch.randn_like(micro) * noise_masks
             micro_noised = micro + noise
-
-            # Remove 'image_filenames' from micro_cond for model input
             micro_cond.pop("image_filenames", None)
 
-            # Get model output
             model_output = self.ddp_model(micro_noised, t, **micro_cond)
 
-            # Apply BB masks and calculate loss
+            # Insert new GAN Discriminator logic here
+            fake_preds = self.discriminator(model_output.detach())
+            gan_loss = self.gan_loss(fake_preds, False)  # Calculate GAN loss for fake predictions
+
+            # Ensure the loss is reduced to a scalar if necessary
+            gan_loss_scalar = gan_loss.mean()  # Use .mean() to reduce to a scalar if not already one
+
+            # Now you can safely call .item() on the scalar value
+            #print(f"GAN loss at timestep {t.item()}: {gan_loss_scalar.item()}")
+
             masked_output = apply_bb_mask(model_output, noise_masks)
             masked_target = apply_bb_mask(micro_noised, noise_masks)
             loss = masked_loss(masked_output, masked_target, noise_masks)
 
-            # Backward pass
             self.mp_trainer.backward(loss / weights.mean())
 
-            # Save noised images with bounding boxes highlighted
-            #save_noised_images_with_bb(micro, noise_masks, temp_filenames, self.step, self.load_bb_data)
-
-            # Compute and log losses
             losses = self.diffusion.training_losses(self.ddp_model, micro, t, model_kwargs=micro_cond)
             loss = (losses["loss"] * weights).mean()
             log_loss_dict(self.diffusion, t, {k: v * weights for k, v in losses.items()})
 
-            
-            compute_losses = functools.partial(
-                    self.diffusion.training_losses,
-                    self.ddp_model,
-                    micro,
-                    t,
-                    model_kwargs=micro_cond,
-                )
-            
-            # Add this line to remove 'image_filenames' from micro_cond before passing it to the model
+            compute_losses = functools.partial(self.diffusion.training_losses, self.ddp_model, micro, t, model_kwargs=micro_cond)
+
             if 'image_filenames' in micro_cond:
                 del micro_cond['image_filenames']
 
@@ -269,18 +260,15 @@ class TrainLoop:
                 losses = compute_losses()
             else:
                 with self.ddp_model.no_sync():
-                    losses = compute_losses()     
+                    losses = compute_losses()
 
             if isinstance(self.schedule_sampler, LossAwareSampler):
-                self.schedule_sampler.update_with_local_losses(
-                    t, losses["loss"].detach()
-                )
+                self.schedule_sampler.update_with_local_losses(t, losses["loss"].detach())
 
             loss = (losses["loss"] * weights).mean()
-            log_loss_dict(
-                self.diffusion, t, {k: v * weights for k, v in losses.items()}
-            )
+            log_loss_dict(self.diffusion, t, {k: v * weights for k, v in losses.items()})
             self.mp_trainer.backward(loss)
+
 
     def _update_ema(self):
         for rate, params in zip(self.ema_rate, self.ema_params):
