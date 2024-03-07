@@ -93,6 +93,8 @@ def main():
         schedule_sampler=schedule_sampler,
         weight_decay=args.weight_decay,
         lr_anneal_steps=args.lr_anneal_steps,
+        discriminator=discriminator,  # Add this line
+        gan_loss=gan_loss,  # Add this line
     ).run_loop()
 
 
