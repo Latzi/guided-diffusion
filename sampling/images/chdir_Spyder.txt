@@ -1,3 +1,1 @@
-import os
-print(os.getcwd())
-os.chdir('/path/to/your/directory')
+placeholder
