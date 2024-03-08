@@ -239,6 +239,9 @@ class TrainLoop:
             print("GAN loss tensor:", gan_loss)
             #print("GAN loss tensor shape:", gan_loss.shape)
 
+            # Logging the GAN loss
+            logger.logkv("gan_loss", gan_loss.item())
+            
             # Ensure the loss is reduced to a scalar if necessary
             gan_loss_scalar = gan_loss.mean()  # Use .mean() to reduce to a scalar if not already one
 
