@@ -2,10 +2,12 @@ import math
 import random
 import os
 from PIL import Image
+from PIL import ImageOps
 import blobfile as bf
 from mpi4py import MPI
 import numpy as np
 from torch.utils.data import DataLoader, Dataset
+import json
 
 
 def load_data(
@@ -101,28 +103,62 @@ class ImageDataset(Dataset):
         return len(self.local_images)
 
     def __getitem__(self, idx):
+        #print(f"Fetching item {idx}")
         path = self.local_images[idx]
         filename = os.path.basename(path)  # Extract filename from path
+
+        # Load bounding box data. You need to implement the load_bb_data method.
+        bb = self.load_bb_data(filename)
 
         with bf.BlobFile(path, "rb") as f:
             pil_image = Image.open(f)
             pil_image.load()
         pil_image = pil_image.convert("RGB")
 
-        if self.random_crop:
+        image_width, _ = pil_image.size
+
+        # Initialize flip as False
+        flip = False
+
+        if self.random_crop and random.random() < 0:
             arr = random_crop_arr(pil_image, self.resolution)
         else:
             arr = center_crop_arr(pil_image, self.resolution)
 
         if self.random_flip and random.random() < 0.5:
-            arr = arr[:, ::-1]
+            pil_image = ImageOps.mirror(pil_image)  # Flip the image
+            flip = True  # Set flip to True when the image is flipped
 
-        arr = arr.astype(np.float32) / 127.5 - 1
+            # Adjust the bounding box for flipped image
+            original_width = bb['w'] - bb['x']
+            new_x_start = image_width - bb['w']
+            new_x_end = new_x_start + original_width
 
-        out_dict = {'image_filenames': filename}  # Include filename in the returned dictionary
+            # Update bb dictionary
+            bb['x'] = new_x_start
+            bb['w'] = new_x_end
+
+        arr = np.array(pil_image).astype(np.float32) / 127.5 - 1
+
+        out_dict = {
+            'image_filenames': filename,
+            'flip': flip,  # Include flip status in the returned dictionary
+            'bb': bb  # Include updated bounding box in the returned dictionary
+        }
+
         if self.local_classes is not None:
             out_dict["y"] = np.array(self.local_classes[idx], dtype=np.int64)
+
+        # Print the content of out_dict just before returning
+        #print(f"Item {idx} dictionary: {out_dict}")    
         return np.transpose(arr, [2, 0, 1]), out_dict
+
+    def load_bb_data(self, image_filename):
+        # Implement loading of bounding box data from JSON or other source
+        bb_file = os.path.join("/content/guided-diffusion/datasets/Cityscapes_3009_bb/", os.path.splitext(image_filename)[0] + ".json")
+        with open(bb_file, "r") as f:
+            bb_data = json.load(f)
+        return bb_data    
 
 
 
