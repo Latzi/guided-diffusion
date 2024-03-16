@@ -2,6 +2,7 @@ import copy
 import functools
 import os
 import json
+from os.path import join
 import blobfile as bf
 import torch as th
 import torch
@@ -11,6 +12,8 @@ import torchvision.utils as vutils
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from GAN_modules.networks import define_person_D, GANLoss
+import torch.optim as optim
+import torchvision
 
 
 from . import dist_util, logger
@@ -59,6 +62,7 @@ class TrainLoop:
         self.diffusion = diffusion
         self.data = data
         self.discriminator = discriminator  # Store the discriminator as an attribute
+        self.opt_D = optim.Adam(self.discriminator.parameters(), lr=0.0002, betas=(0.5, 0.999))
         self.gan_loss = gan_loss            # Store the GAN loss as an attribute
         self.batch_size = batch_size
         self.microbatch = microbatch if microbatch > 0 else batch_size
@@ -105,6 +109,7 @@ class TrainLoop:
                 copy.deepcopy(self.mp_trainer.master_params)
                 for _ in range(len(self.ema_rate))
             ]
+
 
         if th.cuda.is_available():
             self.use_ddp = True
@@ -176,39 +181,52 @@ class TrainLoop:
 
     def run_loop(self):
         while not self.lr_anneal_steps or self.step + self.resume_step < self.lr_anneal_steps:
-           for batch_data in self.data:  # self.data is your DataLoader instance
-               images, additional_info = batch_data
-               filenames = additional_info['image_filenames']  # Extract filenames
-               batch = images.to(dist_util.dev())  # Move batch to the correct device
-               cond = {'image_filenames': filenames}  # Use the filenames directly
+            for batch_data in self.data:  # self.data is your DataLoader instance
+                images, additional_info = batch_data
+                batch = images.to(dist_util.dev())  # Move batch to the correct device
 
-               self.run_step(batch, cond)  # Pass both batch and cond to run_step
+                # Now directly use additional_info as cond, assuming it includes all required keys
+                cond = additional_info
 
-               # Your existing logging and saving logic
-               if self.step % self.log_interval == 0:
-                   logger.dumpkvs()
-               if self.step % self.save_interval == 0:
-                   self.save()
-                   # Additional break condition for testing
-                   if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
-                       return
-               self.step += 1
+                self.run_step(batch, cond)  # Pass both batch and cond to run_step
 
-           # Save the last checkpoint if it wasn't already saved.
-           if (self.step - 1) % self.save_interval != 0:
-               self.save()
+                # Existing logging and saving logic
+                if self.step % self.log_interval == 0:
+                    logger.dumpkvs()
+                if self.step % self.save_interval == 0:
+                    self.save()
+                    # Additional break condition for testing
+                    if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
+                        return
+                self.step += 1
+
+        # Save the last checkpoint if it wasn't already saved.
+        if (self.step - 1) % self.save_interval != 0:
+            self.save()
 
 
     def run_step(self, batch, cond):
+        #print(f"cond keys before forward_backward: {list(cond.keys())}")
+        # Zero out the gradients for the generator
+        self.opt.zero_grad()
+        self.opt_D.zero_grad()  # Assuming opt_D is the discriminator's optimizer
+
         self.forward_backward(batch, cond)
         took_step = self.mp_trainer.optimize(self.opt)
         if took_step:
             self._update_ema()
         self._anneal_lr()
         self.log_step()
-
+        
     def forward_backward(self, batch, cond):
+        #print(cond.keys())  # Debugging line to check the structure of 'cond'
+        # Initialize GAN loss component for each forward-backward pass
+        gan_loss_component = 0
+        generator_condition_met = False  # Indicates if any images in the batch meet the t < 400 criterion
+        # Zero gradients for both generator and discriminator at the start
         self.mp_trainer.zero_grad()
+
+        # Proceed with processing each microbatch
         for i in range(0, batch.shape[0], self.microbatch):
             micro = batch[i: i + self.microbatch].to(dist_util.dev())
             micro_cond = {k: v[i: i + self.microbatch].to(dist_util.dev()) if isinstance(v, torch.Tensor) else v for k, v in cond.items()}
@@ -216,53 +234,115 @@ class TrainLoop:
             temp_filenames = micro_cond.get("image_filenames", ["image_{}".format(i) for i in range(len(micro))])
             if not temp_filenames:
                 temp_filenames = ["image_{}".format(i) for i in range(len(batch))]
-              
+            
             last_batch = (i + self.microbatch) >= batch.shape[0]
             t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
+            #print(f"Sampled t values: {t}")
 
+            # Process real images for discriminator
+            real_images = batch.to(dist_util.dev())
+            real_preds = self.discriminator(real_images)
+            real_loss = self.gan_loss(real_preds, target_is_real=True)
+
+            # Generate fake images
+            final_images = []  # Initialize a list to store final generated images
             noise_masks = torch.zeros_like(micro)
-            for j, img_name in enumerate(temp_filenames):
-                bb = self.load_bb_data(img_name)
-                noise_masks[j, :, bb['y']:bb['y'] + bb['h'], bb['x']:bb['x'] + bb['w']] = 1
+            #print(f"'bb' in cond: {'bb' in cond}, keys available: {list(cond.keys())}")
+            #print(f"Length of 'bb' in cond: {len(cond['bb'])}")
+            #print(f"Current microbatch index: {i}, BB content: {cond['bb']}")
+            #print(f"cond['bb'] structure before loop: {cond.get('bb', 'bb not in cond')}")
 
+            for j in range(batch.shape[0]):
+                  # Extracting bounding box coordinates for the j-th image
+                  y = cond['bb']['y'][j].item()
+                  x = cond['bb']['x'][j].item()
+                  w = cond['bb']['w'][j].item()  # If w represents the ending x coordinate
+                  h = cond['bb']['h'][j].item()  # If h represents the ending y coordinate
+
+                  # Applying noise within the bounding box area
+                  noise_mask = torch.zeros_like(batch[j])  # Assuming batch[j] is the current image tensor
+                  noise_mask[:, y:h, x:w] = 1
+
+                  # Creating noise and applying it using the mask
+                  noise = torch.randn_like(batch[j]) * noise_mask
+                  batch[j] = batch[j] + noise
+
+            # Exclude 'flip' and 'bb' from micro_cond before passing it to the model
+            if 'flip' in micro_cond:
+                del micro_cond['flip']
+            if 'bb' in micro_cond:
+                del micro_cond['bb']    
+              
             noise = torch.randn_like(micro) * noise_masks
             micro_noised = micro + noise
             micro_cond.pop("image_filenames", None)
-
             model_output = self.ddp_model(micro_noised, t, **micro_cond)
-
-            # Insert new GAN Discriminator logic here
-            fake_preds = self.discriminator(model_output.detach())
-            gan_loss = self.gan_loss(fake_preds, False)  # Calculate GAN loss for fake predictions
-
-            # Right before the problematic print statement, add:
-            print("GAN loss tensor:", gan_loss)
-            #print("GAN loss tensor shape:", gan_loss.shape)
-
-            # Logging the GAN loss
-            logger.logkv("gan_loss", gan_loss.item())
             
-            # Ensure the loss is reduced to a scalar if necessary
-            gan_loss_scalar = gan_loss.mean()  # Use .mean() to reduce to a scalar if not already one
+            # Prepare images for discriminator training
+            discriminator_images = model_output[t < 400]  # Select images where t < 400
+            #print(f"Step {self.step + self.resume_step}: Number of suitable images (t < 400): {discriminator_images.size(0)}")
 
-            # Now you can safely call .item() on the scalar value
-            #print(f"GAN loss at timestep {t.item()}: {gan_loss_scalar.item()}")
+            if discriminator_images.size(0) > 0:
+                generator_condition_met = True  # Set the flag since we have suitable images
+                real_images = batch.to(dist_util.dev())
+                real_preds = self.discriminator(real_images)
+                real_loss = self.gan_loss(real_preds, target_is_real=True)
+                fake_preds = self.discriminator(discriminator_images.detach())
+                fake_loss = self.gan_loss(fake_preds, target_is_real=False)
+                d_loss = real_loss + fake_loss
+                gan_loss_component = d_loss.item()  # Update the GAN loss component
+                d_loss.backward()
+                self.opt_D.step()
+                print(f"Discriminator Loss (d_loss): {d_loss.item()}")
+                logger.logkv("d_loss", d_loss.item())
 
-            masked_output = apply_bb_mask(model_output, noise_masks)
-            masked_target = apply_bb_mask(micro_noised, noise_masks)
-            loss = masked_loss(masked_output, masked_target, noise_masks)
+                # Saving images presented to the discriminator
+                if (self.step + self.resume_step) % 1000 == 0:
+                    save_dir = "/content/guided-diffusion/discriminator_images"
+                    for j, image in enumerate(discriminator_images):
+                        if j >= 2000:  # Limit the number of images to save
+                            break
+                        # Directly denormalize the image from [-1, 1] to [0, 1] for saving
+                        image_to_save = (image + 1) / 2
+                        image_to_save = image_to_save.clamp(0, 1)  # Ensure values are within [0, 1]
+                        # Construct the file path
+                        image_save_path = os.path.join(save_dir, f"generated_image_{self.step + self.resume_step}_{j}.png")
+                        # Save the image
+                        torchvision.utils.save_image(image_to_save, image_save_path)
+            else:
+                # No suitable images for this step, ensure gan_loss_component remains 0
+                gan_loss_component = 0
 
-            self.mp_trainer.backward(loss / weights.mean())
+            # Generator updates
+            if generator_condition_met:
+                fake_preds_for_gen = self.discriminator(model_output)
+                gen_loss = self.gan_loss(fake_preds_for_gen, target_is_real=True)
+            else:
+                #gen_loss = 0  # No generator loss if condition is not met
+                gen_loss = torch.tensor(0.0, device=batch.device, dtype=torch.float32) 
 
+            # Calculate L1 Loss for generator 
             losses = self.diffusion.training_losses(self.ddp_model, micro, t, model_kwargs=micro_cond)
-            loss = (losses["loss"] * weights).mean()
-            log_loss_dict(self.diffusion, t, {k: v * weights for k, v in losses.items()})
+            original_diffusion_loss = (losses["loss"] * weights).mean()
+            # Assuming real_images and model_output are properly defined
+            l1_loss = F.l1_loss(model_output, real_images, reduction='mean')
+            # Hyperparameter for scaling the L1 loss component
+            lambda_l1 = 0.01  # This value is adjustable
+            total_gen_loss = original_diffusion_loss + 0.001 * gen_loss + 0.001 * gan_loss_component + lambda_l1 * l1_loss
+            self.mp_trainer.backward(total_gen_loss / weights.mean())
+            print(f"Generator Loss (gen_loss): {gen_loss.item()}")
+            print(f"L1_loss (l1_loss): {l1_loss.item()}")
+            logger.logkv("gen_loss", gen_loss.item())
+            logger.logkv("l1_loss", l1_loss.item())
 
+            print(f"Total Generator Loss (total_gen_loss): {total_gen_loss.item()}")
+            logger.logkv("total_gen_loss", total_gen_loss.item())
+
+            # Handle non-syncing for DDP
             compute_losses = functools.partial(self.diffusion.training_losses, self.ddp_model, micro, t, model_kwargs=micro_cond)
-
             if 'image_filenames' in micro_cond:
                 del micro_cond['image_filenames']
-
+            
             if last_batch or not self.use_ddp:
                 losses = compute_losses()
             else:
@@ -272,9 +352,10 @@ class TrainLoop:
             if isinstance(self.schedule_sampler, LossAwareSampler):
                 self.schedule_sampler.update_with_local_losses(t, losses["loss"].detach())
 
+            #save_noised_images_with_bb(micro, noise_masks, temp_filenames, self.step, self.load_bb_data)
             loss = (losses["loss"] * weights).mean()
             log_loss_dict(self.diffusion, t, {k: v * weights for k, v in losses.items()})
-            self.mp_trainer.backward(loss)
+
 
 
     def _update_ema(self):
@@ -387,5 +468,9 @@ def save_noised_images_with_bb(images, noise_masks, filenames, step, load_bb_dat
         noised_image[:, bb['y']:bb['y']+bb['h'], bb['x']:bb['x']+1] = 1  # Left border
         noised_image[:, bb['y']:bb['y']+bb['h'], bb['x']+bb['w']-1:bb['x']+bb['w']] = 1  # Right border
 
+         # Directly denormalize the image from [-1, 1] to [0, 1] for saving
+        image_to_save = (noised_image + 1) / 2
+        image_to_save = image_to_save.clamp(0, 1)  # Ensure values are within [0, 1]
+
         save_path = os.path.join(save_dir, f"noised_bb_image_{i}_step_{step}.png")
-        vutils.save_image(noised_image, save_path)
+        vutils.save_image(image_to_save, save_path)
