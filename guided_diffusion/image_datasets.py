@@ -131,7 +131,7 @@ class ImageDataset(Dataset):
 
             # Adjust the bounding box for flipped image
             original_width = bb['w'] - bb['x']
-            new_x_start = image_width - bb['w']
+            new_x_start = image_width - (bb['x'] + original_width)
             new_x_end = new_x_start + original_width
 
             # Update bb dictionary
