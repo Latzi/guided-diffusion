@@ -173,11 +173,11 @@ class TrainLoop:
             )
             self.opt.load_state_dict(state_dict)
 
-    def load_bb_data(self, image_filename, bbox_dir="/content/guided-diffusion/datasets/Cityscapes_3009_bb/"):
+    """def load_bb_data(self, image_filename, bbox_dir="/content/guided-diffusion/datasets/Cityscapes_3009_bb/"):
         bb_file = os.path.join(bbox_dir, os.path.splitext(image_filename)[0] + ".json")
         with open(bb_file, "r") as f:
             bb_data = json.load(f)
-        return bb_data  # Assuming bb_data is a dictionary with 'x', 'y', 'w', 'h' keys        
+        return bb_data  # Assuming bb_data is a dictionary with 'x', 'y', 'w', 'h' keys """       
 
     def run_loop(self):
         while not self.lr_anneal_steps or self.step + self.resume_step < self.lr_anneal_steps:
@@ -250,7 +250,8 @@ class TrainLoop:
             #print(f"'bb' in cond: {'bb' in cond}, keys available: {list(cond.keys())}")
             #print(f"Length of 'bb' in cond: {len(cond['bb'])}")
             #print(f"Current microbatch index: {i}, BB content: {cond['bb']}")
-            #print(f"cond['bb'] structure before loop: {cond.get('bb', 'bb not in cond')}")
+            print(f"cond['bb'] structure before loop: {cond.get('bb', 'bb not in cond')}")
+            print(f"cond['flip'] flip status before loop: {cond.get('flip')}")
 
             for j in range(batch.shape[0]):
                   # Extracting bounding box coordinates for the j-th image
@@ -261,7 +262,12 @@ class TrainLoop:
 
                   # Applying noise within the bounding box area
                   noise_mask = torch.zeros_like(batch[j])  # Assuming batch[j] is the current image tensor
-                  noise_mask[:, y:h, x:w] = 1
+                  actual_width = w - x
+                  actual_height = h - y
+                  # Apply the mask within the correct BB area
+                  noise_masks[j, :, y:y + actual_height, x:x + actual_width] = 1
+                  #noise_mask[:, y:h, x:w] = 1
+
 
                   # Creating noise and applying it using the mask
                   noise = torch.randn_like(batch[j]) * noise_mask
@@ -279,7 +285,7 @@ class TrainLoop:
             model_output = self.ddp_model(micro_noised, t, **micro_cond)
             
             # Prepare images for discriminator training
-            discriminator_images = model_output[t < 400]  # Select images where t < 400
+            discriminator_images = model_output[t < 4000]  # Select images where t < 400
             #print(f"Step {self.step + self.resume_step}: Number of suitable images (t < 400): {discriminator_images.size(0)}")
 
             if discriminator_images.size(0) > 0:
@@ -297,7 +303,7 @@ class TrainLoop:
                 logger.logkv("d_loss", d_loss.item())
 
                 # Saving images presented to the discriminator
-                if (self.step + self.resume_step) % 1000 == 0:
+                if (self.step + self.resume_step) % 10 == 0:
                     save_dir = "/content/guided-diffusion/discriminator_images"
                     for j, image in enumerate(discriminator_images):
                         if j >= 2000:  # Limit the number of images to save
@@ -305,8 +311,10 @@ class TrainLoop:
                         # Directly denormalize the image from [-1, 1] to [0, 1] for saving
                         image_to_save = (image + 1) / 2
                         image_to_save = image_to_save.clamp(0, 1)  # Ensure values are within [0, 1]
-                        # Construct the file path
-                        image_save_path = os.path.join(save_dir, f"generated_image_{self.step + self.resume_step}_{j}.png")
+                        # Construct the file path using the original image filename
+                        original_filename = temp_filenames[j].replace(".jpg", "").replace(".png", "")  # Assuming filenames have standard image extensions
+                        image_save_path = os.path.join(save_dir, f"{original_filename}_step_{self.step+self.resume_step}.png")
+                        #image_save_path = os.path.join(save_dir, f"generated_image_{self.step + self.resume_step}_{j}.png")
                         # Save the image
                         torchvision.utils.save_image(image_to_save, image_save_path)
             else:
