@@ -42,7 +42,7 @@ def main():
 
     for i in range(args.num_samples):
         bb = bbs[i % len(bbs)]
-        noise_shape = (3, 32, 32)
+        noise_shape = (3, 256, 256)
         noisy_image = apply_noise_within_bbs(noise_shape, bb).to(dist_util.dev())
         noisy_image = noisy_image.unsqueeze(0)  # Add a batch dimension
         sample = diffusion.p_sample_loop(model, noisy_image.shape, noise=noisy_image, clip_denoised=args.clip_denoised)
@@ -65,7 +65,7 @@ def main():
     logger.log("sampling complete")
 
 def create_argparser():
-    defaults = dict(clip_denoised=True, num_samples=1000, batch_size=16, use_ddim=False, model_path="")
+    defaults = dict(clip_denoised=True, num_samples=16, batch_size=16, use_ddim=False, model_path="")
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
     add_dict_to_argparser(parser, defaults)
