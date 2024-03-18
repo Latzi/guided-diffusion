@@ -34,7 +34,7 @@ def main():
     model.eval()
 
     logger.log("loading BBs...")
-    bbs = load_bbs("/fred/oz097/latzi/diffusionGAN/guided-diffusion/sampling/bbox")
+    bbs = load_bbs("/content/guided-diffusion/sampling/bbox")
 
     logger.log("sampling...")
     all_images = []
