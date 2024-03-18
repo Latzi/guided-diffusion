@@ -57,7 +57,7 @@ def main():
             arr = np.stack(all_images).astype(np.uint8)
             batch_num = (i + 1) // save_interval
             #out_path = f"/content/guided-diffusion/results/samples_batch_{batch_num}.npz"
-            out_path = f"/fred/oz097/latzi/diffusionGAN/guided-diffusion/sample_images/samples_batch_{batch_num}.npz"
+            out_path = f"/content/guided-diffusion/sample_images/samples_batch_{batch_num}.npz"
             logger.log(f"saving to {out_path}")
             np.savez(out_path, arr)
             all_images = []  # Reset the list for the next batch
