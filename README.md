@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # guided-diffusion
 
 This is the codebase for [Diffusion Models Beat GANS on Image Synthesis](http://arxiv.org/abs/2105.05233).
@@ -174,3 +175,7 @@ mpiexec -n N python scripts/classifier_sample.py \
 ```
 
 To sample for 250 timesteps without DDIM, replace `--timestep_respacing ddim25` to `--timestep_respacing 250`, and replace `--use_ddim True` with `--use_ddim False`.
+=======
+# FDGAN
+Repo for FDGAN
+>>>>>>> 75a23742605d15867ea1ee5d17964752c7b5d750
